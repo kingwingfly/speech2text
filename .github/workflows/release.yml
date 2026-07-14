@@ -9,9 +9,10 @@ name: release
 #
 # We do NOT bundle ONNX Runtime or FFmpeg. `ort` loads onnxruntime dynamically
 # (set ORT_DYLIB_PATH), and FFmpeg is expected to be installed by the user
-# (pacman / Homebrew / winget). The build only needs FFmpeg *8.x* to link
-# against — apt's ffmpeg is too old (6.x), so on Linux/Windows we point
-# FFMPEG_DIR at a prebuilt 8.x dev tree, and macOS uses Homebrew's ffmpeg.
+# (pacman / Homebrew / winget). The build must link against FFmpeg *8.1* to
+# match `ffmpeg-next` 8.1.0's ABI — apt's ffmpeg is too old, and BtbN's master
+# snapshot is too new, so on Linux/Windows we point FFMPEG_DIR at a pinned
+# prebuilt FFmpeg 8.1 dev tree; macOS uses Homebrew's ffmpeg (8.x).
 
 on:
   push:
@@ -29,10 +30,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Prebuilt FFmpeg 8.x (shared, with headers + import libs) used only to link
+  # Prebuilt FFmpeg 8.1 (shared, with headers + import libs) used only to link
   # against at build time. Nothing from here is shipped in the release.
-  FFMPEG_LINUX_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl-shared.tar.xz"
-  FFMPEG_WIN_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+  # Pin the n8.1 RELEASE branch, not `master`: ffmpeg-next 8.1.0 targets the
+  # FFmpeg 8.1 ABI, and BtbN's `master` snapshot has moved past it (removed
+  # AVCodec fields / new side-data enum variants → ffmpeg-next fails to compile).
+  FFMPEG_LINUX_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz"
+  FFMPEG_WIN_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
 
 jobs:
   build:
