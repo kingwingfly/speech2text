@@ -111,6 +111,10 @@ struct RealtimeArgs {
     /// RMS threshold (on [-1, 1] samples) above which audio counts as speech.
     #[arg(long, default_value_t = 0.012)]
     vad_threshold: f32,
+    /// Require this password to access the app (HTTP Basic auth, username
+    /// "stt"). Also read from the STT_REALTIME_PASSWORD env var. Unset = open.
+    #[arg(long, alias = "pwd", env = "STT_REALTIME_PASSWORD")]
+    password: Option<String>,
 }
 
 impl RealtimeArgs {
@@ -128,6 +132,12 @@ impl RealtimeArgs {
             partial_ms: 900,
             max_secs: 15.0,
             vad_threshold: 0.012,
+            // clap's `env` is bypassed on this bare-invocation path, so read it
+            // by hand — a password set via env still applies to `cargo leptos
+            // watch`'s bare `stt`.
+            password: std::env::var("STT_REALTIME_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -216,5 +226,6 @@ fn realtime(a: RealtimeArgs) -> Result<()> {
             max_secs: a.max_secs,
             threshold: a.vad_threshold,
         },
+        password: a.password.filter(|s| !s.is_empty()),
     })
 }

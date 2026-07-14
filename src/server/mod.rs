@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use leptos_axum::{LeptosRoutes, generate_route_list};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tower_http::validate_request::ValidateRequestHeaderLayer;
 
 use crate::app::{App, shell};
 use crate::asr::{ModelSource, Recognizer};
@@ -24,6 +25,9 @@ pub struct ServeOpts {
     pub language: String,
     pub itn: bool,
     pub vad: VadConfig,
+    /// Optional HTTP Basic-auth password protecting the whole app. `None`
+    /// leaves the server open.
+    pub password: Option<String>,
 }
 
 /// Voice-activity / chunking parameters for the WebSocket handler.
@@ -98,7 +102,7 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     let state = AppState { leptos_options: leptos_options.clone(), engine, vad: opts.vad };
     let routes = generate_route_list(App);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/ws", axum::routing::get(ws::handler))
         .leptos_routes(&state, routes, {
             let opts = leptos_options.clone();
@@ -106,6 +110,21 @@ async fn serve(opts: ServeOpts) -> Result<()> {
         })
         .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
         .with_state(state);
+
+    // Optional password gate. HTTP Basic auth covers every route including the
+    // `/ws` upgrade — the browser prompts once, caches the credential for the
+    // origin, and re-sends it on the WebSocket handshake. Username is fixed to
+    // "stt"; only the password is checked.
+    if let Some(pw) = &opts.password {
+        // `basic` is deprecated as "too basic for real applications", but a
+        // fixed-credential gate is precisely the intent here (single user, LAN,
+        // TLS at the reverse proxy). Avoids hand-rolling base64 for a custom
+        // validator.
+        #[allow(deprecated)]
+        let layer = ValidateRequestHeaderLayer::basic("stt", pw);
+        app = app.layer(layer);
+        tracing::info!("password protection enabled (HTTP Basic auth, user \"stt\")");
+    }
 
     let addr = leptos_options.site_addr;
     tracing::info!("realtime STT server listening on http://{addr}");

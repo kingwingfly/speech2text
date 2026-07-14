@@ -28,6 +28,7 @@ RUST_LOG=debug cargo run --bin stt -- ...   # per-module logging; metadata parsi
 cargo leptos watch               # dev server w/ hot reload; bare `stt` defaults to `realtime`
 cargo leptos build               # builds wasm + Tailwind + server binary
 stt realtime --addr 127.0.0.1:3000   # run the built server explicitly
+stt realtime --password hunter2      # gate app+/ws behind HTTP Basic auth (user "stt"); or STT_REALTIME_PASSWORD
 ```
 
 There is no test suite. Verify the CLI against the sample files in `audio/` (gitignored). Verify the web app with `cargo leptos build` (both feature builds must compile) then `cargo leptos watch` and a browser at http://127.0.0.1:3000 — actual mic streaming needs a real browser + microphone.
