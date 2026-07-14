@@ -113,8 +113,18 @@ jobs:
       # --- Build the site + server binary ------------------------------------
       # cargo-leptos compiles the wasm/hydrate lib, Tailwind, and the ssr server
       # binary; the site lands in target/site, the binary in target/release.
-      - name: cargo leptos build
+      - name: cargo leptos build (Unix)
+        if: runner.os != 'Windows'
         shell: bash
+        run: cargo leptos build --release
+
+      # Windows: use PowerShell, NOT bash. Under Git Bash, `/usr/bin` is
+      # prepended to PATH and its coreutils `link.exe` shadows the MSVC linker,
+      # so rustc calls the wrong `link` and fails ("/usr/bin/link: extra
+      # operand"). pwsh keeps the msvc-dev-cmd environment intact.
+      - name: cargo leptos build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: cargo leptos build --release
 
       # --- Package -----------------------------------------------------------

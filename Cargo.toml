@@ -3,7 +3,12 @@ name = "stt"
 version = "0.1.0"
 edition = "2024"
 
+# The lib is named `stt_lib`, distinct from the `stt` binary, so the native
+# build's cdylib (`stt_lib`) and the executable (`stt`) don't collide on their
+# output filename (notably `stt.pdb` on Windows — cargo issue #6313). The wasm
+# bundle name stays `stt`, controlled by `output-name` under metadata.leptos.
 [lib]
+name = "stt_lib"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 

@@ -49,7 +49,7 @@ The core STT data flow is one direction: audio bytes → f32 PCM → FBank featu
 **Native / `ssr` (server + CLI):**
 
 - **`lib.rs`** — crate root: declares modules (STT ones gated behind `ssr`), and the `#[wasm_bindgen] hydrate()` entrypoint for the browser build.
-- **`main.rs`** — clap CLI (`preprocess`, `transcribe`, `realtime`; a bare invocation defaults to `realtime` so `cargo leptos watch` works). Sets `ORT_DYLIB_PATH` and configures tracing (silences onnxruntime info logs via `ort::logging=warn`). Uses the library crate as `stt::…`.
+- **`main.rs`** — clap CLI (`preprocess`, `transcribe`, `realtime`; a bare invocation defaults to `realtime` so `cargo leptos watch` works). Sets `ORT_DYLIB_PATH` and configures tracing (silences onnxruntime info logs via `ort::logging=warn`). Uses the library crate as `stt_lib::…` (the lib is named `stt_lib` so its native cdylib doesn't collide with the `stt` binary's output filename; the wasm bundle stays `stt` via `output-name`).
 - **`server/mod.rs`** — the realtime server: loads the `Recognizer` once, shares it as `Arc<Mutex<Recognizer>>` (inference runs via `spawn_blocking`), and serves the Leptos SSR routes + `/ws` on axum. `Engine::infer` wraps `Recognizer::transcribe_once`.
 - **`server/ws.rs`** — the WebSocket handler: buffers incoming f32 PCM, runs energy-based VAD to emit live **partials** (~1×/s) and **finalize** a line on a pause (or at the `max_secs` cap), streaming `SttMsg` JSON back.
 

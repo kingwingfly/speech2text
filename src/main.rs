@@ -7,9 +7,9 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
-use stt::asr::{ModelSource, Recognizer};
-use stt::server::{ServeOpts, VadConfig};
-use stt::{audio, server};
+use stt_lib::asr::{ModelSource, Recognizer};
+use stt_lib::server::{ServeOpts, VadConfig};
+use stt_lib::{audio, server};
 
 #[derive(Parser)]
 #[command(
