@@ -1,0 +1,268 @@
+name: release
+
+# Build release archives for the `stt` binary + the Leptos site (html/js/css/wasm).
+# Triggered by pushing a `v*` tag, or run manually.
+#
+#   linux-x86_64   -> tar.gz
+#   darwin-arm64   -> tar.gz
+#   windows-x86_64 -> zip
+#
+# We do NOT bundle ONNX Runtime or FFmpeg. `ort` loads onnxruntime dynamically
+# (set ORT_DYLIB_PATH), and FFmpeg is expected to be installed by the user
+# (pacman / Homebrew / winget). The build only needs FFmpeg *8.x* to link
+# against — apt's ffmpeg is too old (6.x), so on Linux/Windows we point
+# FFMPEG_DIR at a prebuilt 8.x dev tree, and macOS uses Homebrew's ffmpeg.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag/version to publish a GitHub Release for (leave blank to only upload build artifacts)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Prebuilt FFmpeg 8.x (shared, with headers + import libs) used only to link
+  # against at build time. Nothing from here is shipped in the release.
+  FFMPEG_LINUX_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl-shared.tar.xz"
+  FFMPEG_WIN_URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: darwin-arm64
+            os: macos-14
+          - name: windows-x86_64
+            os: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            v="${{ github.event.inputs.tag }}"
+          else
+            base="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+            v="v${base}-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+      # --- Toolchains --------------------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-leptos
+        shell: bash
+        run: cargo binstall -y cargo-leptos
+
+      # --- FFmpeg 8.x (build-time link dependency, not shipped) --------------
+      - name: FFmpeg 8.x (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake
+          curl -fL "$FFMPEG_LINUX_URL" -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          dir="$PWD/$(tar tf ffmpeg.tar.xz | head -1 | cut -d/ -f1)"
+          echo "FFMPEG_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: FFmpeg 8.x (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: FFmpeg 8.x (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:FFMPEG_WIN_URL -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-dist
+          $dir = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
+          # ffmpeg-sys-next links against $FFMPEG_DIR/{include,lib}.
+          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # --- Build the site + server binary ------------------------------------
+      # cargo-leptos compiles the wasm/hydrate lib, Tailwind, and the ssr server
+      # binary; the site lands in target/site, the binary in target/release.
+      - name: cargo leptos build
+        shell: bash
+        run: cargo leptos build --release
+
+      # --- Package -----------------------------------------------------------
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          PKG="stt-${VER}-${{ matrix.name }}"
+          STAGE="dist/${PKG}"
+          mkdir -p "${STAGE}/site"
+
+          cp target/release/stt "${STAGE}/stt"
+          cp -R target/site/. "${STAGE}/site/"
+
+          # Launcher: sets the LEPTOS_* env vars the standalone binary needs to
+          # serve the bundled site/, then execs the binary with any args passed.
+          cat > "${STAGE}/run.sh" <<'EOF'
+          #!/usr/bin/env sh
+          # Launch stt from this package. Pass any `stt` args through, e.g.:
+          #   ./run.sh realtime --addr 0.0.0.0:3000
+          #   ./run.sh transcribe --input clean.wav
+          set -eu
+          DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+          # ONNX Runtime is loaded dynamically by `ort`. Point ORT_DYLIB_PATH at
+          # your onnxruntime shared library if needed. The binary falls back to
+          # /usr/lib/libonnxruntime.so when unset (fine on most Linux). On macOS
+          # set it, e.g.:  export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
+          #
+          # FFmpeg 8.x must be installed on this machine (pacman / Homebrew).
+
+          # Leptos static site (html/js/css/wasm) served by the SSR binary.
+          export LEPTOS_OUTPUT_NAME=stt
+          export LEPTOS_SITE_ROOT="$DIR/site"
+          export LEPTOS_SITE_PKG_DIR=pkg
+          : "${LEPTOS_SITE_ADDR:=127.0.0.1:3000}"
+          export LEPTOS_SITE_ADDR
+
+          exec "$DIR/stt" "$@"
+          EOF
+          chmod +x "${STAGE}/run.sh"
+
+          cat > "${STAGE}/README.txt" <<EOF
+          stt ${VER} (${{ matrix.name }})
+
+          Run:   ./run.sh                             # starts the realtime web server
+                 ./run.sh realtime --addr 0.0.0.0:3000
+                 ./run.sh transcribe --input clean.wav
+
+          run.sh sets the LEPTOS_* env vars needed to serve the bundled site/.
+
+          Runtime dependencies (NOT bundled):
+            * ONNX Runtime  — set ORT_DYLIB_PATH to your onnxruntime shared lib.
+                              Linux defaults to /usr/lib/libonnxruntime.so.
+                              GPU users: point it at an onnxruntime-gpu build.
+            * FFmpeg 8.x    — install via your package manager (pacman / brew).
+
+          Microphone needs a secure context: use http://localhost, or an
+          HTTPS-terminating reverse proxy in front (it must also upgrade /ws).
+          EOF
+
+          tar -C dist -czf "dist/${PKG}.tar.gz" "${PKG}"
+          rm -rf "${STAGE}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Ver = "${{ steps.ver.outputs.version }}"
+          $Pkg = "stt-$Ver-${{ matrix.name }}"
+          $Stage = "dist/$Pkg"
+          New-Item -ItemType Directory -Force -Path "$Stage/site" | Out-Null
+
+          Copy-Item target/release/stt.exe "$Stage/stt.exe"
+          Copy-Item target/site/* "$Stage/site" -Recurse
+
+          # Launcher: sets the LEPTOS_* env vars, then runs the binary.
+          $runps1 = @'
+          # Launch stt from this package. Pass any `stt` args through, e.g.:
+          #   .\run.ps1 realtime --addr 0.0.0.0:3000
+          #   .\run.ps1 transcribe --input clean.wav
+          $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+          # ONNX Runtime is loaded dynamically by `ort`; set ORT_DYLIB_PATH to
+          # your onnxruntime.dll, e.g.:
+          #   $env:ORT_DYLIB_PATH = 'C:\onnxruntime\lib\onnxruntime.dll'
+          # FFmpeg 8.x must be installed and on PATH (e.g. via winget).
+
+          $env:LEPTOS_OUTPUT_NAME = 'stt'
+          $env:LEPTOS_SITE_ROOT = Join-Path $Dir 'site'
+          $env:LEPTOS_SITE_PKG_DIR = 'pkg'
+          if (-not $env:LEPTOS_SITE_ADDR) { $env:LEPTOS_SITE_ADDR = '127.0.0.1:3000' }
+          & (Join-Path $Dir 'stt.exe') @args
+          exit $LASTEXITCODE
+          '@
+          Set-Content -Path "$Stage/run.ps1" -Value $runps1 -Encoding utf8
+
+          $readme = @"
+          stt $Ver (${{ matrix.name }})
+
+          Run (PowerShell):  .\run.ps1
+                             .\run.ps1 realtime --addr 0.0.0.0:3000
+                             .\run.ps1 transcribe --input clean.wav
+
+          run.ps1 sets the LEPTOS_* env vars needed to serve the bundled site\.
+
+          Runtime dependencies (NOT bundled):
+            * ONNX Runtime  - set ORT_DYLIB_PATH to your onnxruntime.dll.
+                              GPU users: point it at an onnxruntime-gpu build.
+            * FFmpeg 8.x    - install and put on PATH (e.g. via winget).
+
+          Microphone needs a secure context: use http://localhost, or an
+          HTTPS-terminating reverse proxy in front (it must also upgrade /ws).
+          "@
+          Set-Content -Path "$Stage/README.txt" -Value $readme -Encoding utf8
+
+          # -Path <dir> keeps the top-level package folder inside the zip, matching
+          # the tar.gz layout produced on Unix.
+          Compress-Archive -Path $Stage -DestinationPath "dist/$Pkg.zip" -Force
+          Remove-Item -Recurse -Force $Stage
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Publish a GitHub Release when a tag was pushed, or when a tag was supplied
+    # to a manual run. Plain manual runs just leave the build artifacts above.
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
