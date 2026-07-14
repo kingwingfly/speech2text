@@ -13,10 +13,6 @@ const FRAME_LENGTH: usize = 400; // 25 ms @ 16 kHz; knf needs at least one frame
 pub struct Fbank;
 
 impl Fbank {
-    pub fn new() -> Self {
-        Fbank
-    }
-
     /// Compute log-mel FBank features for `samples`, one 80-dim vector per frame.
     ///
     /// `scale` matches the model's `normalize_samples` flag: pass `1.0` when the

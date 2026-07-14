@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 const HF_REPO: &str = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17";
 
 /// Segment length and the search radius used to snap cuts to silence.
-const CHUNK_SECS: f32 = 15.0;
+pub const CHUNK_SECS: f32 = 15.0;
 const SEARCH_SECS: f32 = 2.0;
 
 /// Where to obtain the model from.
@@ -68,7 +68,11 @@ impl Recognizer {
             .commit_from_file(&model_path)
             .with_context(|| format!("loading ONNX model {}", model_path.display()))?;
 
-        let input_names = session.inputs().iter().map(|i| i.name().to_string()).collect();
+        let input_names = session
+            .inputs()
+            .iter()
+            .map(|i| i.name().to_string())
+            .collect();
         let output_name = session
             .outputs()
             .first()
@@ -78,19 +82,54 @@ impl Recognizer {
 
         let meta = parse_meta(&session)?;
         let tokens = load_tokens(&tokens_path)?;
-        tracing::info!("vocab: {} tokens, lfr {}x{}", tokens.len(), meta.lfr_m, meta.lfr_n);
+        tracing::info!(
+            "vocab: {} tokens, lfr {}x{}",
+            tokens.len(),
+            meta.lfr_m,
+            meta.lfr_n
+        );
 
-        Ok(Self { session, input_names, output_name, tokens, meta, fbank: Fbank::new() })
+        Ok(Self {
+            session,
+            input_names,
+            output_name,
+            tokens,
+            meta,
+            fbank: Fbank,
+        })
+    }
+
+    /// Resolve the language and text-norm tensor ids for a request.
+    fn resolve_ids(&self, language: &str, itn: bool) -> Result<(i32, i32)> {
+        let lang_id = *self.meta.lang_ids.get(language).ok_or_else(|| {
+            anyhow!(
+                "unsupported language '{language}'; known: {:?}",
+                self.meta.lang_ids.keys()
+            )
+        })?;
+        let textnorm_id = if itn {
+            self.meta.with_itn
+        } else {
+            self.meta.without_itn
+        };
+        Ok((lang_id, textnorm_id))
+    }
+
+    /// Transcribe a single already-segmented buffer in one shot (no silence
+    /// splitting). Used by the realtime server, which feeds short utterances.
+    pub fn transcribe_once(
+        &mut self,
+        samples: &[f32],
+        language: &str,
+        itn: bool,
+    ) -> Result<String> {
+        let (lang_id, textnorm_id) = self.resolve_ids(language, itn)?;
+        self.run_chunk(samples, lang_id, textnorm_id)
     }
 
     /// Transcribe a full recording (16 kHz mono f32), chunking long audio.
     pub fn transcribe(&mut self, samples: &[f32], language: &str, itn: bool) -> Result<String> {
-        let lang_id = *self
-            .meta
-            .lang_ids
-            .get(language)
-            .ok_or_else(|| anyhow!("unsupported language '{language}'; known: {:?}", self.meta.lang_ids.keys()))?;
-        let textnorm_id = if itn { self.meta.with_itn } else { self.meta.without_itn };
+        let (lang_id, textnorm_id) = self.resolve_ids(language, itn)?;
 
         let segments = audio::split_segments(samples, CHUNK_SECS, SEARCH_SECS);
         let mut pieces: Vec<String> = Vec::new();
@@ -169,7 +208,9 @@ impl Recognizer {
     fn detokenize(&self, ids: &[usize]) -> String {
         let mut text = String::new();
         for &id in ids {
-            let Some(tok) = self.tokens.get(id) else { continue };
+            let Some(tok) = self.tokens.get(id) else {
+                continue;
+            };
             // Skip SenseVoice special tokens like <|zh|>, <|NEUTRAL|>, <|woitn|>, <s>, </s>.
             if tok.starts_with('<') {
                 continue;
@@ -187,7 +228,11 @@ impl Recognizer {
 }
 
 fn resolve_files(source: ModelSource, fp32: bool) -> Result<(PathBuf, PathBuf)> {
-    let model_file = if fp32 { "model.onnx" } else { "model.int8.onnx" };
+    let model_file = if fp32 {
+        "model.onnx"
+    } else {
+        "model.int8.onnx"
+    };
     match source {
         ModelSource::Local(dir) => {
             let model = dir.join(model_file);
@@ -199,7 +244,9 @@ fn resolve_files(source: ModelSource, fp32: bool) -> Result<(PathBuf, PathBuf)> 
         }
         ModelSource::HuggingFace => {
             use hf_hub::api::sync::Api;
-            tracing::info!("fetching {model_file} from {HF_REPO} (first run downloads, then cached)");
+            tracing::info!(
+                "fetching {model_file} from {HF_REPO} (first run downloads, then cached)"
+            );
             let api = Api::new()?;
             let repo = api.model(HF_REPO.to_string());
             let model = repo.get(model_file).context("downloading model")?;
@@ -210,7 +257,8 @@ fn resolve_files(source: ModelSource, fp32: bool) -> Result<(PathBuf, PathBuf)> 
 }
 
 fn load_tokens(path: &Path) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     // Each line: "<token> <id>"; place token at its id index.
     let mut pairs: Vec<(usize, String)> = Vec::new();
     let mut max_id = 0;
@@ -222,7 +270,10 @@ fn load_tokens(path: &Path) -> Result<Vec<String>> {
         let (tok, id) = line
             .rsplit_once(' ')
             .ok_or_else(|| anyhow!("malformed tokens.txt line: {line:?}"))?;
-        let id: usize = id.trim().parse().with_context(|| format!("bad id in line {line:?}"))?;
+        let id: usize = id
+            .trim()
+            .parse()
+            .with_context(|| format!("bad id in line {line:?}"))?;
         max_id = max_id.max(id);
         pairs.push((id, tok.to_string()));
     }
@@ -236,17 +287,30 @@ fn load_tokens(path: &Path) -> Result<Vec<String>> {
 fn parse_meta(session: &Session) -> Result<Meta> {
     let md = session.metadata()?;
     let get = |k: &str| md.custom(k);
-    let get_req = |k: &str| md.custom(k).ok_or_else(|| anyhow!("model metadata missing '{k}'"));
+    let get_req = |k: &str| {
+        md.custom(k)
+            .ok_or_else(|| anyhow!("model metadata missing '{k}'"))
+    };
 
     let parse_int = |k: &str| -> Result<i32> {
-        get_req(k)?.trim().parse().with_context(|| format!("parsing metadata '{k}'"))
+        get_req(k)?
+            .trim()
+            .parse()
+            .with_context(|| format!("parsing metadata '{k}'"))
     };
     let parse_floats = |k: &str| -> Result<Vec<f32>> {
         let raw = get_req(k)?;
-        tracing::debug!("metadata {k}: len={}, prefix={:?}", raw.len(), &raw[..raw.len().min(80)]);
+        tracing::debug!(
+            "metadata {k}: len={}, prefix={:?}",
+            raw.len(),
+            &raw[..raw.len().min(80)]
+        );
         raw.split([',', ' ', '\t', '\n', '\r', '[', ']'])
             .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<f32>().map_err(|e| anyhow!("metadata '{k}' token {s:?}: {e}")))
+            .map(|s| {
+                s.parse::<f32>()
+                    .map_err(|e| anyhow!("metadata '{k}' token {s:?}: {e}"))
+            })
             .collect()
     };
 
@@ -254,7 +318,9 @@ fn parse_meta(session: &Session) -> Result<Meta> {
     let lfr_n = parse_int("lfr_window_shift")? as usize;
     let normalize_samples = parse_int("normalize_samples").unwrap_or(0);
     let sample_scale = if normalize_samples != 0 { 1.0 } else { 32768.0 };
-    let blank_id = get("blank_id").and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let blank_id = get("blank_id")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
 
     let neg_mean = parse_floats("neg_mean")?;
     let inv_stddev = parse_floats("inv_stddev")?;
@@ -272,5 +338,15 @@ fn parse_meta(session: &Session) -> Result<Meta> {
         return Err(anyhow!("model metadata has no language ids (lang_*)"));
     }
 
-    Ok(Meta { lfr_m, lfr_n, sample_scale, neg_mean, inv_stddev, blank_id, with_itn, without_itn, lang_ids })
+    Ok(Meta {
+        lfr_m,
+        lfr_n,
+        sample_scale,
+        neg_mean,
+        inv_stddev,
+        blank_id,
+        with_itn,
+        without_itn,
+        lang_ids,
+    })
 }

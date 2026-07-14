@@ -1,0 +1,4 @@
+@import "tailwindcss";
+
+/* Scan the Rust sources for utility classes (path is relative to this file). */
+@source "../src";

@@ -83,19 +83,19 @@ Two ways to use it:
 
 ```sh
 # 1) Explicit two-step
-speech2text preprocess --input lecture.aac --output clean.wav
-speech2text transcribe --input clean.wav --output out.txt
+stt preprocess --input lecture.aac --output clean.wav
+stt transcribe --input clean.wav --output out.txt
 
 # 2) One shot: denoise then transcribe
-speech2text transcribe --input lecture.aac --denoise --output out.txt
+stt transcribe --input lecture.aac --denoise --output out.txt
 
 # 3) Already-clean audio: skip preprocessing entirely
-speech2text transcribe --input clean.wav
+stt transcribe --input clean.wav
 
 # options
-speech2text transcribe --input lecture.aac --language zh   # default; also auto, en, ja, ko, yue
-speech2text transcribe --input lecture.aac --fp32          # full-precision model.onnx
-speech2text transcribe --input lecture.aac --cpu           # force CPU execution provider
+stt transcribe --input lecture.aac --language zh   # default; also auto, en, ja, ko, yue
+stt transcribe --input lecture.aac --fp32          # full-precision model.onnx
+stt transcribe --input lecture.aac --cpu           # force CPU execution provider
 ```
 
 ### `preprocess`
@@ -120,6 +120,57 @@ speech2text transcribe --input lecture.aac --cpu           # force CPU execution
 | `--fp32` | Use `model.onnx` instead of `model.int8.onnx` | off |
 | `--cpu` | Disable CUDA, run on CPU | off |
 | `--model-dir <DIR>` | Load `model[.int8].onnx` + `tokens.txt` locally instead of downloading | download |
+
+## Realtime web app (`realtime`)
+
+A browser front-end for **live** transcription, aimed at readers who need large,
+paced text (e.g. hard-of-hearing elders). The browser records the mic, streams
+16 kHz PCM to the server over a WebSocket, and the server streams text back.
+
+- **Live partials + finalize:** SenseVoice is an offline model, so the server
+  re-transcribes the in-progress utterance ~once a second (a "partial") and
+  finalizes a line when it detects a pause (energy-based VAD).
+- **Paced reading pane:** finalized lines are released one at a time, each held on
+  screen for an adjustable **dwell time**, so fast speech doesn't scroll away
+  before it can be read. A `⏳ N 等待中` badge shows the backlog. Font size and
+  dwell time are adjustable live; a dim "listening…" line previews the current
+  partial.
+
+The UI is a **Leptos SSR** app styled with **Tailwind CSS**, built by
+[`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos).
+
+```sh
+# Dev (rebuilds on change, sets up wasm + Tailwind automatically):
+cargo leptos watch                 # bare `stt` binary defaults to `realtime`
+
+# On the same machine, open http://127.0.0.1:3000 and click 开始.
+
+# To use it from another device (phone/tablet on the LAN), bind broadly and put
+# an HTTPS-terminating reverse proxy in front (see the note below):
+stt realtime --addr 0.0.0.0:3000
+```
+
+> **Microphone requires a secure context.** Browsers only expose the mic over
+> **HTTPS**, or on `http://localhost` / `127.0.0.1` (the server machine itself).
+> This app speaks **plain HTTP only** — terminate TLS at a reverse proxy in front
+> of it (**Pingora**, **Cloudflare**, nginx, Caddy, …) and forward to
+> `stt realtime`, making sure the proxy also upgrades the `/ws` WebSocket. Without
+> a secure context the page shows a clear message instead of recording.
+
+| Flag | Description | Default |
+|---|---|---|
+| `--addr <HOST:PORT>` | Address to bind | Leptos config (`127.0.0.1:3000`) |
+| `--language <LANG>` | `auto`, `zh`, `en`, `ja`, `ko`, `yue` | `zh` |
+| `--no-itn` | Disable inverse text normalization | off (ITN on) |
+| `--fp32` / `--cpu` / `--model-dir <DIR>` | As in `transcribe` | — |
+| `--silence-ms <MS>` | Trailing silence that finalizes an utterance | `600` |
+| `--partial-ms <MS>` | How often to emit a live partial | `900` |
+| `--max-secs <S>` | Hard cap on an utterance before a forced finalize | `15` |
+| `--vad-threshold <F>` | RMS threshold above which audio counts as speech | `0.012` |
+
+The Tailwind version cargo-leptos downloads is pinned in `.env`
+(`LEPTOS_TAILWIND_VERSION`) so the build doesn't depend on GitHub's "latest"
+release resolving to a published Linux binary.
 
 ## First-run model download
 
@@ -149,6 +200,11 @@ about a minute end-to-end (decode + ~150 chunks), i.e. ~35× realtime.
   `ffmpeg` on Arch, `libavfilter-dev` & friends on Debian/Ubuntu.
 - A **C++ toolchain and CMake** at build time: `knf-rs` compiles
   kaldi-native-fbank from source.
+- **For the `realtime` web app only:** [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
+  and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).
+  cargo-leptos fetches the Tailwind CLI and wasm-bindgen tooling itself — no
+  npm/node required. The plain CLI (`preprocess`/`transcribe`) builds without any
+  of this via `cargo build --release`.
 
 > Note: `knf-rs` computes FBank with kaldi's default `povey` window (SenseVoice
 > was trained with `hamming`), and its high-level helper applies a per-utterance
@@ -166,3 +222,6 @@ about a minute end-to-end (decode + ~150 chunks), i.e. ~35× realtime.
 | FBank features | `knf-rs` (kaldi-native-fbank C++ bindings) |
 | Model download | `hf-hub` (0.5, blocking `ureq` backend) |
 | Errors / logging | `anyhow`, `tracing` |
+| Realtime web UI | `leptos` (SSR + hydrate), Tailwind CSS, `cargo-leptos` |
+| Realtime server / WebSocket | `axum`, `tokio`, `leptos_axum` |
+| Browser mic capture | `web-sys` (Web Audio + WebSocket, via wasm) |
