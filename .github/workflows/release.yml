@@ -75,15 +75,28 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # cache-bin: false is deliberate. With it on, rust-cache caches
+      # ${CARGO_HOME}/bin *and* .crates.toml/.crates2.json, but its pre-save
+      # cleanup deletes a restored cargo-leptos from bin/ while leaving it
+      # listed in the metadata. The next run then restores a cache claiming
+      # cargo-leptos is installed with no binary behind it: binstall skips the
+      # install ("already installed") and the build dies with
+      # "no such command: `leptos`". Only the registry/target are worth caching
+      # here anyway — binstall fetches a prebuilt binary in seconds.
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+          cache-bin: false
 
       - uses: cargo-bins/cargo-binstall@main
 
+      # --force: never trust pre-existing install metadata, always lay down the
+      # binary. Then prove it actually resolves before the long build starts.
       - name: Install cargo-leptos
         shell: bash
-        run: cargo binstall -y cargo-leptos
+        run: |
+          cargo binstall -y --force cargo-leptos
+          cargo leptos --version
 
       # --- FFmpeg 8.x (build-time link dependency, not shipped) --------------
       - name: FFmpeg 8.x (Linux)
