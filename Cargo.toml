@@ -39,6 +39,7 @@ hound = { version = "3.5", optional = true }
 hf-hub = { version = "0.5", default-features = false, features = ["ureq"], optional = true }
 knf-rs = { version = "0.3", optional = true }
 anyhow = { version = "1", optional = true }
+getrandom = { version = "0.3", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
@@ -61,7 +62,8 @@ default = ["ssr"]
 ssr = [
     "dep:leptos_axum", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http",
     "dep:clap", "dep:ort", "dep:ndarray", "dep:ffmpeg-next", "dep:hound",
-    "dep:hf-hub", "dep:knf-rs", "dep:anyhow", "dep:tracing", "dep:tracing-subscriber",
+    "dep:hf-hub", "dep:knf-rs", "dep:anyhow", "dep:getrandom",
+    "dep:tracing", "dep:tracing-subscriber",
     "leptos/ssr", "leptos_meta/ssr", "leptos_router/ssr",
 ]
 hydrate = [

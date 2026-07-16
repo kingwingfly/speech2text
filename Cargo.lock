@@ -2848,6 +2848,7 @@ dependencies = [
  "clap",
  "console_error_panic_hook",
  "ffmpeg-next",
+ "getrandom 0.3.4",
  "hf-hub",
  "hound",
  "js-sys",

@@ -173,11 +173,14 @@ stt realtime --addr 0.0.0.0:3000
 
 Pass `--password <PW>` (or set `STT_REALTIME_PASSWORD`) to gate the whole app —
 the SSR pages **and** the `/ws` audio stream — behind **HTTP Basic auth**. The
-browser prompts once, caches the credential for the origin, and re-sends it on
-the WebSocket handshake, so the elderly user only logs in a single time. The
-username is fixed to **`stt`**; only the password is checked. Leave it unset to
-run open (e.g. on a trusted LAN). Since the app speaks plain HTTP, put it behind
-the HTTPS-terminating reverse proxy above so the password isn't sent in the clear.
+browser prompts once when the page loads; that authenticated response hands back
+a session cookie, which the browser then sends on the WebSocket handshake, so
+pressing **Start** does not ask for the password again and the elderly user only
+logs in a single time. The username is fixed to **`stt`**; only the password is
+checked. The session lasts until the browser closes or the server restarts.
+Leave it unset to run open (e.g. on a trusted LAN). Since the app speaks plain
+HTTP, put it behind the HTTPS-terminating reverse proxy above so the password
+isn't sent in the clear.
 
 The Tailwind version cargo-leptos downloads is pinned in `.env`
 (`LEPTOS_TAILWIND_VERSION`) so the build doesn't depend on GitHub's "latest"

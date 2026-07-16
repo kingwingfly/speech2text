@@ -6,6 +6,8 @@ mod ws;
 use anyhow::Result;
 use axum::Router;
 use axum::extract::FromRef;
+use axum::http::{HeaderMap, HeaderValue, header};
+use axum::response::Response;
 use leptos::config::get_configuration;
 use leptos::prelude::*;
 use leptos_axum::{LeptosRoutes, generate_route_list};
@@ -66,11 +68,60 @@ impl Engine {
     }
 }
 
+/// Name of the session cookie minted for clients that pass the Basic-auth gate.
+const AUTH_COOKIE: &str = "stt_auth";
+
+/// Bridges the Basic-auth gate to `/ws`.
+///
+/// Browsers never attach cached HTTP Basic credentials to a WebSocket
+/// handshake — the WebSocket API can't set headers, and the HTTP auth cache
+/// isn't consulted for `ws://`/`wss://`. So `/ws` can't sit behind the Basic
+/// layer: it would 401 and pop a second credential prompt that can't ever
+/// succeed. Instead every page response that clears the gate carries this
+/// token as a cookie, which the browser *does* send on the same-origin
+/// handshake, and `/ws` checks that.
+///
+/// The token is random per process, so a restart invalidates outstanding
+/// sessions.
+pub(crate) struct Auth {
+    token: String,
+}
+
+impl Auth {
+    fn new() -> Result<Self> {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no OS randomness: {e}"))?;
+        Ok(Self { token: bytes.iter().map(|b| format!("{b:02x}")).collect() })
+    }
+
+    /// A session cookie (no `Max-Age`): it dies with the browser session, and
+    /// the token dies with the process.
+    fn cookie(&self) -> HeaderValue {
+        let v = format!("{AUTH_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict", self.token);
+        HeaderValue::from_str(&v).expect("hex token is a valid header value")
+    }
+
+    /// Does this request carry the token a page load handed out? Compared
+    /// naively rather than in constant time: guessing 256 random bits over a
+    /// LAN is not a threat this gate needs to model.
+    pub(crate) fn cookie_ok(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(';'))
+            .filter_map(|kv| kv.split_once('='))
+            .any(|(k, v)| k.trim() == AUTH_COOKIE && v.trim() == self.token)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     leptos_options: LeptosOptions,
     engine: Arc<Engine>,
     vad: VadConfig,
+    /// `None` when the server is running without a password.
+    auth: Option<Arc<Auth>>,
 }
 
 impl FromRef<AppState> for LeptosOptions {
@@ -99,32 +150,52 @@ async fn serve(opts: ServeOpts) -> Result<()> {
     let rec = Recognizer::load(source, opts.fp32, opts.cpu)?;
     let engine = Arc::new(Engine::new(rec, opts.language, opts.itn));
 
-    let state = AppState { leptos_options: leptos_options.clone(), engine, vad: opts.vad };
+    let auth = match opts.password {
+        Some(_) => Some(Arc::new(Auth::new()?)),
+        None => None,
+    };
+    let state =
+        AppState { leptos_options: leptos_options.clone(), engine, vad: opts.vad, auth: auth.clone() };
     let routes = generate_route_list(App);
 
-    let mut app = Router::new()
-        .route("/ws", axum::routing::get(ws::handler))
+    let mut pages = Router::new()
         .leptos_routes(&state, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())
         })
-        .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell))
-        .with_state(state);
+        .fallback(leptos_axum::file_and_error_handler::<AppState, _>(shell));
 
-    // Optional password gate. HTTP Basic auth covers every route including the
-    // `/ws` upgrade — the browser prompts once, caches the credential for the
-    // origin, and re-sends it on the WebSocket handshake. Username is fixed to
-    // "stt"; only the password is checked.
-    if let Some(pw) = &opts.password {
-        // `basic` is deprecated as "too basic for real applications", but a
-        // fixed-credential gate is precisely the intent here (single user, LAN,
-        // TLS at the reverse proxy). Avoids hand-rolling base64 for a custom
-        // validator.
-        #[allow(deprecated)]
-        let layer = ValidateRequestHeaderLayer::basic("stt", pw);
-        app = app.layer(layer);
+    // Optional password gate, on the page routes only. `/ws` authenticates off
+    // the cookie minted here instead — see `Auth`. Username is fixed to "stt";
+    // only the password is checked.
+    if let (Some(pw), Some(auth)) = (&opts.password, &auth) {
+        let cookie = auth.cookie();
+        // The last `.layer` is the outermost, so Basic auth runs first and
+        // short-circuits with a 401; the cookie is only minted onto responses
+        // it let through.
+        pages = pages
+            .layer(axum::middleware::map_response(move |mut res: Response| {
+                let cookie = cookie.clone();
+                async move {
+                    res.headers_mut().insert(header::SET_COOKIE, cookie);
+                    res
+                }
+            }))
+            // `basic` is deprecated as "too basic for real applications", but a
+            // fixed-credential gate is precisely the intent here (single user,
+            // LAN, TLS at the reverse proxy). Avoids hand-rolling base64 for a
+            // custom validator.
+            .layer({
+                #[allow(deprecated)]
+                ValidateRequestHeaderLayer::basic("stt", pw)
+            });
         tracing::info!("password protection enabled (HTTP Basic auth, user \"stt\")");
     }
+
+    let app = Router::new()
+        .route("/ws", axum::routing::get(ws::handler))
+        .merge(pages)
+        .with_state(state);
 
     let addr = leptos_options.site_addr;
     tracing::info!("realtime STT server listening on http://{addr}");

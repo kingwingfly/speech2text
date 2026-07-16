@@ -3,7 +3,8 @@
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 use super::{AppState, Engine, VadConfig};
@@ -13,7 +14,20 @@ const SAMPLE_RATE: f32 = 16_000.0;
 /// Fewer samples than one FBank frame produce no features; skip inference.
 const MIN_SAMPLES: usize = 400;
 
-pub async fn handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Authenticate off the session cookie, not Basic auth: see `super::Auth`.
+    // The 401 deliberately carries no `WWW-Authenticate`, so a stale or missing
+    // cookie fails quietly instead of prompting the user mid-session.
+    if let Some(auth) = &state.auth
+        && !auth.cookie_ok(&headers)
+    {
+        tracing::warn!("rejected /ws upgrade: missing or stale session cookie");
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     ws.on_upgrade(move |socket| session(socket, state.engine, state.vad))
 }
 
